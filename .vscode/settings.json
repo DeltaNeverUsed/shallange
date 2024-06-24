@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "*.embeddedhtml": "html",
+        "bit": "cpp",
+        "__verbose_abort": "cpp"
+    }
+}
