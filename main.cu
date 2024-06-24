@@ -2,7 +2,7 @@
 #include <cuda/std/bit>
 #include <chrono>
 
-__device__ constexpr uint64_t hashes_per_thread = 0x100000;
+__device__ constexpr uint64_t hashes_per_thread = 0x010000;
 __device__ constexpr char* chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 __device__ constexpr unsigned int message_prefix_len = 16;
@@ -141,6 +141,7 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
         //message[62] = message_len_bits & 0xFF00;
         //message[63] = message_len_bits & 0x00FF;
 
+        #pragma unroll
         for (uint16_t i = 16; i < 64; i++)
         {
             auto womp = sigma1(words[i-2]) + words[i-7];
@@ -169,6 +170,7 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
         uint32_t g = 0x1f83d9ab;
         uint32_t h = 0x5be0cd19;
         
+        #pragma unroll
         for (size_t i = 0; i < 64; i++)
         {
             uint32_t t1 = h + Sigma1(e) + Ch(e,f,g) + K[i] + words[i];
@@ -247,7 +249,7 @@ int main() {
     for (size_t i = 0; i < 8; i++)
         current_best_hash[i] = 0xFFFFFFFF;
 
-    uint64_t nonce_start = 2127366416;
+    uint64_t nonce_start = 1053060396;
 
     auto grid_dim = 38 * 2;
     auto block_dim = 256;
