@@ -96,7 +96,7 @@ __device__ __host__ bool is_hash_smaller(const uint32_t* hash1, const uint32_t* 
 
 __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonces) {
     union {
-        char     bytes[64] = "DeltaNeverUsed/\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x80\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        char     bytes[64] = "DeltaNeverUsed/_\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x80\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
         uint32_t ints[16];
     } prefix;
 
@@ -115,59 +115,53 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
     hashes[hash_index + 6] = 0xFFFFFFFF;
     hashes[hash_index + 7] = 0xFFFFFFFF;
 
-    uint64_t nonce_p1 = (global_id + nonce_start) * hashes_per_thread;
+    uint64_t nonce_p1 = (global_id + nonce_start) + (global_id * hashes_per_thread);
     constexpr auto m_len = message_prefix_len + 16;
 
-    auto flipped_len = __byte_perm((m_len-1) * 8, 0, 0x0123);
+    union {
+        uint8_t  message[512];
+        uint32_t words[64];
+    };
+
+    #pragma unroll
+    for (size_t i = 0; i < 64; i+=4)
+    {
+        #pragma unroll
+        for (size_t l = 0; l < 4; l++)
+        {
+            message[i + l] = prefix.bytes[i + 3 - l];
+        }
+    }
+
+    words[15] = m_len * 8;
 
     for (size_t itter = 0; itter < hashes_per_thread; itter++)
     {
-        
         uint64_t nonce = nonce_p1 + itter;
         uint64_t n = nonce;
 
         #pragma unroll
-        for (size_t i = message_prefix_len-1; i < m_len-1; i++)
+        for (size_t i = message_prefix_len; i < m_len; i++)
         {
             prefix.bytes[i] = chars[nonce % 62];
             nonce /= 62;
-            if (nonce < 0)
-                nonce = 0;
         }
 
-        prefix.ints[15] = flipped_len;
-        
-        union {
-            uint8_t  message[512];
-            uint32_t words[64];
-        };
-
-        //message[message_prefix_len-1] = 0x80;
-
-        // maybe fix bit swappy swap
         #pragma unroll
-        for (size_t i = 0; i < 64; i+=4)
+        for (size_t i = 16; i < 32; i+=4)
         {
             #pragma unroll
             for (size_t l = 0; l < 4; l++)
             {
                 message[i + l] = prefix.bytes[i + 3 - l];
             }
-
-            //printf("%u\n", words[i/4]);
         }
-
-        //message[62] = message_len_bits & 0xFF00;
-        //message[63] = message_len_bits & 0x00FF;
 
         #pragma unroll
         for (uint16_t i = 16; i < 64; i++)
         {
             words[i] = sigma1(words[i-2]) + words[i-7] + sigma0(words[i-15]) + words[i-16];
-            //printf("%u, %u\n", i, words[i]);
         }
-
-        //print_message(message);
 
         /*
         print_message(message);
@@ -179,18 +173,18 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
         constexpr uint32_t h0[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
 
         union {
-        struct {
-            uint32_t a;
-            uint32_t b;
-            uint32_t c;
-            uint32_t d;
-            uint32_t e;
-            uint32_t f;
-            uint32_t g;
-            uint32_t h;
-        };
-        uint32_t arr[8];
-    } u = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+            struct {
+                uint32_t a;
+                uint32_t b;
+                uint32_t c;
+                uint32_t d;
+                uint32_t e;
+                uint32_t f;
+                uint32_t g;
+                uint32_t h;
+            };
+            uint32_t arr[8];
+        } u = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
 
         
         #pragma unroll
@@ -246,15 +240,13 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
 }
 
 void get_print_hash(uint64_t nonce) {
-    char bytes[64] = "DeltaNeverUsed/\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+    char bytes[64] = "DeltaNeverUsed/_\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
     auto m_len = message_prefix_len + 16;
-    for (size_t i = message_prefix_len-1; i < m_len-1; i++)
+    for (size_t i = message_prefix_len; i < m_len; i++)
     {
         bytes[i] = chars[nonce % 62];
         nonce /= 62;
-        if (nonce < 0)
-            nonce = 0;
     }
 
     printf(bytes);
@@ -278,7 +270,7 @@ int main() {
     for (size_t i = 0; i < 8; i++)
         current_best_hash[i] = 0xFFFFFFFF;
 
-    uint64_t nonce_start = 17063690622567168097;
+    uint64_t nonce_start = 26522835175;
 
     auto grid_dim = 38 * 2;
     auto block_dim = 256;
@@ -294,9 +286,9 @@ int main() {
     cudaMalloc(&device_hashes, arr_size_bytes);
     cudaMalloc(&device_nonces, arr_size * sizeof(uint64_t));
     
-    gpu_hash<<<grid_dim, block_dim>>>(nonce_start, device_hashes, device_nonces);
     std::thread check = std::thread(hashrate_check);
 
+    gpu_hash<<<grid_dim, block_dim>>>(nonce_start + arr_size * hashes_per_thread, device_hashes, device_nonces);
     while (true)
     {
         cudaDeviceSynchronize();
