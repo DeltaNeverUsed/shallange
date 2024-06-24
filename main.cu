@@ -124,10 +124,10 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
     };
 
     #pragma unroll
-    for (size_t i = 0; i < 64; i+=4)
+    for (uint_fast8_t i = 0; i < 64; i+=4)
     {
         #pragma unroll
-        for (size_t l = 0; l < 4; l++)
+        for (uint_fast8_t l = 0; l < 4; l++)
         {
             message[i + l] = prefix.bytes[i + 3 - l];
         }
@@ -135,30 +135,30 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
 
     words[15] = m_len * 8;
 
-    for (size_t itter = 0; itter < hashes_per_thread; itter++)
+    for (uint32_t itter = 0; itter < hashes_per_thread; itter++)
     {
         uint64_t nonce = nonce_p1 + itter;
         uint64_t n = nonce;
 
         #pragma unroll
-        for (size_t i = message_prefix_len; i < m_len; i++)
+        for (uint_fast8_t i = message_prefix_len; i < m_len; i++)
         {
             prefix.bytes[i] = chars[nonce % 62];
             nonce /= 62;
         }
 
         #pragma unroll
-        for (size_t i = 16; i < 32; i+=4)
+        for (uint_fast8_t i = 16; i < 32; i+=4)
         {
             #pragma unroll
-            for (size_t l = 0; l < 4; l++)
+            for (uint_fast8_t l = 0; l < 4; l++)
             {
                 message[i + l] = prefix.bytes[i + 3 - l];
             }
         }
 
         #pragma unroll
-        for (uint16_t i = 16; i < 64; i++)
+        for (uint_fast8_t i = 16; i < 64; i++)
         {
             words[i] = sigma1(words[i-2]) + words[i-7] + sigma0(words[i-15]) + words[i-16];
         }
@@ -188,7 +188,7 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
 
         
         #pragma unroll
-        for (size_t i = 0; i < 64; i++)
+        for (uint_fast8_t i = 0; i < 64; i++)
         {
             uint32_t t1 = u.h + Sigma1(u.e) + Ch(u.e,u.f,u.g) + K[i] + words[i];
             uint32_t t2 = Sigma0(u.a) + Maj(u.a,u.b,u.c);
@@ -204,7 +204,7 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
         }
 
         auto new_better = false;
-        size_t i = 0;
+        uint_fast8_t i = 0;
         #pragma unroll
         for (;i < 4; ++i) {
             u.arr[i] = u.arr[i] + h0[i];
@@ -218,13 +218,13 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
         i++;
         if (new_better){
             #pragma unroll
-            for (size_t j = 0; j < i; j++)
+            for (uint_fast8_t j = 0; j < i; j++)
             {
                 hashes[hash_index + j] = u.arr[j];
             }
 
             #pragma unroll
-            for (size_t j = i; j < 8; j++)
+            for (uint_fast8_t j = i; j < 8; j++)
             {
                 hashes[hash_index + j] = u.arr[j] + h0[j];
             }
@@ -270,7 +270,7 @@ int main() {
     for (size_t i = 0; i < 8; i++)
         current_best_hash[i] = 0xFFFFFFFF;
 
-    uint64_t nonce_start = 26522835175;
+    uint64_t nonce_start = 1807759095699;
 
     auto grid_dim = 38 * 2;
     auto block_dim = 256;
