@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <cuda/std/bit>
 
+__device__ constexpr char* chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
 __device__ constexpr unsigned int message_prefix_len = 16;
 
 __device__ const uint32_t K[64] = { 
@@ -77,17 +79,28 @@ __device__ __host__ void print_uint32(uint32_t value) {
     printf("\n");
 }
 
-__global__ void gpu_hash(uint32_t nonce_start) {
+__global__ void gpu_hash(uint32_t nonce_start, uint32_t *hashes) {
     union {
-        char     bytes[64] = "DeltaNeverUsed/\x80\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        char     bytes[64] = "DeltaNeverUsed/\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x80\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
         uint32_t ints[16];
     } prefix;
-
-    prefix.ints[15] = __byte_perm((message_prefix_len-1) * 8, 0, 0x0123);
 
     auto thread_id = threadIdx.x;
     auto block_id = blockIdx.x;
     auto global_id = thread_id + block_id * blockDim.x;
+    uint32_t nonce = global_id + nonce_start;
+
+    auto m_len = message_prefix_len + 16;
+    for (size_t i = message_prefix_len-1; i < m_len-1; i++)
+    {
+        prefix.bytes[i] = chars[nonce % 62];
+        nonce /= 62;
+        if (nonce < 0)
+            nonce = 0;
+    }
+
+    prefix.ints[15] = __byte_perm((m_len-1) * 8, 0, 0x0123);
+    
 
     union {
         uint8_t  message[512];
@@ -122,15 +135,14 @@ __global__ void gpu_hash(uint32_t nonce_start) {
 
     //print_message(message);
 
-    
+    /*
     print_message(message);
     print_message(message + 64);
     print_message(message + 64 * 2);
     print_message(message + 64 * 3);
-    
+    */
    
     constexpr uint32_t h0[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
-    uint32_t ht[8];
 
     uint32_t a = 0x6a09e667;
     uint32_t b = 0xbb67ae85;
@@ -156,23 +168,117 @@ __global__ void gpu_hash(uint32_t nonce_start) {
         a = t1 + t2;
     }
 
-    ht[0] = a + h0[0]; //__byte_perm(a + h0[0], 0, 0x0123);
-    ht[1] = b + h0[1]; //__byte_perm(b + h0[1], 0, 0x0123);
-    ht[2] = c + h0[2]; //__byte_perm(c + h0[2], 0, 0x0123);
-    ht[3] = d + h0[3]; //__byte_perm(d + h0[3], 0, 0x0123);
-    ht[4] = e + h0[4]; //__byte_perm(e + h0[4], 0, 0x0123);
-    ht[5] = f + h0[5]; //__byte_perm(f + h0[5], 0, 0x0123);
-    ht[6] = g + h0[6]; //__byte_perm(g + h0[6], 0, 0x0123);
-    ht[7] = h + h0[7]; //__byte_perm(h + h0[7], 0, 0x0123);
+    auto index = global_id * 8;
 
-    printf("%x%x%x%x%x%x%x%x", ht[0], ht[1], ht[2], ht[3], ht[4], ht[5], ht[6], ht[7]);
+    hashes[index] = a + h0[0]; //__byte_perm(a + h0[0], 0, 0x0123);
+    hashes[index + 1] = b + h0[1]; //__byte_perm(b + h0[1], 0, 0x0123);
+    hashes[index + 2] = c + h0[2]; //__byte_perm(c + h0[2], 0, 0x0123);
+    hashes[index + 3] = d + h0[3]; //__byte_perm(d + h0[3], 0, 0x0123);
+    hashes[index + 4] = e + h0[4]; //__byte_perm(e + h0[4], 0, 0x0123);
+    hashes[index + 5] = f + h0[5]; //__byte_perm(f + h0[5], 0, 0x0123);
+    hashes[index + 6] = g + h0[6]; //__byte_perm(g + h0[6], 0, 0x0123);
+    hashes[index + 7] = h + h0[7]; //__byte_perm(h + h0[7], 0, 0x0123);
 
+    //prefix.bytes[m_len-1] = 0;
+    //printf(prefix.bytes);
+    //printf("\n%x%x%x%x%x%x%x%x\n", ht[0], ht[1], ht[2], ht[3], ht[4], ht[5], ht[6], ht[7]);
 }
 
+void get_print_hash(uint32_t global_id, uint32_t nonce_start) {
+    char bytes[64] = "DeltaNeverUsed/\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+    uint32_t nonce = global_id += nonce_start;
+
+    auto m_len = message_prefix_len + 16;
+    for (size_t i = message_prefix_len-1; i < m_len-1; i++)
+    {
+        bytes[i] = chars[nonce % 62];
+        nonce /= 62;
+        if (nonce < 0)
+            nonce = 0;
+    }
+
+    printf(bytes);
+}
+
+bool is_hash_smaller(const uint32_t* hash1, const uint32_t* hash2) {
+    for (size_t i = 0; i < 8; ++i) {
+        if (hash1[i] < hash2[i]) {
+            return true;
+        } else if (hash1[i] > hash2[i]) {
+            return false;
+        }
+    }
+    return false;
+}
 
 int main() {
 
+    uint32_t current_best_hash[8];
+    for (size_t i = 0; i < 8; i++)
+        current_best_hash[i] = 0xFFFFFFFF;
+    
+
     uint32_t nonce_start = 0;
 
-    gpu_hash<<<1,1>>>(nonce_start);
+    auto block_dim = 1024;
+    auto grid_dim = 128;
+
+    size_t arr_size = block_dim * grid_dim;
+    size_t arr_size_bytes = arr_size * sizeof(uint32_t) * 8;
+
+    uint32_t* hashes = (uint32_t*)malloc(arr_size_bytes);
+    uint32_t* device_hashes;
+
+    cudaMalloc(&device_hashes, arr_size_bytes);
+
+    gpu_hash<<<grid_dim, block_dim>>>(nonce_start, device_hashes);
+
+    uint64_t hashes_done = 0;
+
+    while (true)
+    {
+        cudaDeviceSynchronize();
+        cudaMemcpy(hashes, device_hashes, arr_size_bytes, cudaMemcpyDeviceToHost);
+        gpu_hash<<<grid_dim, block_dim>>>(nonce_start + arr_size, device_hashes);
+        hashes_done += arr_size;
+
+
+        for (size_t i = 0; i < arr_size; i++)
+        {
+            auto v = i * 8;
+            if (is_hash_smaller(hashes + v, current_best_hash)) {
+                printf("i: %u v: %u\n", i, v);
+                current_best_hash[0] = hashes[v];
+                current_best_hash[1] = hashes[1 + v];
+                current_best_hash[2] = hashes[2 + v];
+                current_best_hash[3] = hashes[3 + v];
+                current_best_hash[4] = hashes[4 + v];
+                current_best_hash[5] = hashes[5 + v];
+                current_best_hash[6] = hashes[6 + v];
+                current_best_hash[7] = hashes[7 + v];
+
+                char temp[80];
+
+                printf("Smaller hash found!\n");
+                get_print_hash(i, nonce_start);
+                sprintf(temp, "\n%08x%08x%08x%08x%08x%08x%08x%08x\n", current_best_hash[0], current_best_hash[1], current_best_hash[2], current_best_hash[3], current_best_hash[4], current_best_hash[5], current_best_hash[6], current_best_hash[7]);
+                printf(temp);
+                
+                for (size_t i = 0; i < 64; i++){
+                    if (temp[i+1] != '0') {
+                        printf("Got %u zeros\n\n", i);
+                        break;
+                    }
+                }
+                
+            }
+        }
+
+        nonce_start += arr_size;
+    }
+    
+    
+    
+
+    cudaFree(device_hashes);
 }
