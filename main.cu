@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <cuda/std/bit>
+#include <chrono>
 
+__device__ constexpr uint64_t hashes_per_thread = 0x100000;
 __device__ constexpr char* chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 __device__ constexpr unsigned int message_prefix_len = 16;
@@ -79,114 +81,153 @@ __device__ __host__ void print_uint32(uint32_t value) {
     printf("\n");
 }
 
-__global__ void gpu_hash(uint32_t nonce_start, uint32_t *hashes) {
+__device__ __host__ bool is_hash_smaller(const uint32_t* hash1, const uint32_t* hash2) {
+    for (size_t i = 0; i < 8; ++i) {
+        if (hash1[i] < hash2[i]) {
+            return true;
+        } else if (hash1[i] > hash2[i]) {
+            return false;
+        }
+    }
+    return false;
+}
+
+__global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonces) {
     union {
         char     bytes[64] = "DeltaNeverUsed/\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x80\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
         uint32_t ints[16];
     } prefix;
 
-    auto thread_id = threadIdx.x;
-    auto block_id = blockIdx.x;
-    auto global_id = thread_id + block_id * blockDim.x;
-    uint32_t nonce = global_id + nonce_start;
-
-    auto m_len = message_prefix_len + 16;
-    for (size_t i = message_prefix_len-1; i < m_len-1; i++)
+    for (size_t itter = 0; itter < hashes_per_thread; itter++)
     {
-        prefix.bytes[i] = chars[nonce % 62];
-        nonce /= 62;
-        if (nonce < 0)
-            nonce = 0;
-    }
+        auto thread_id = threadIdx.x;
+        auto block_id = blockIdx.x;
+        auto global_id = thread_id + block_id * blockDim.x;
+        uint64_t nonce = (global_id + nonce_start) * hashes_per_thread + itter;
+        uint64_t n = nonce;
 
-    prefix.ints[15] = __byte_perm((m_len-1) * 8, 0, 0x0123);
-    
-
-    union {
-        uint8_t  message[512];
-        uint32_t words[64];
-    };
-
-
-    //message[message_prefix_len-1] = 0x80;
-
-    // maybe fix bit swappy swap
-    for (size_t i = 0; i < 64; i+=4)
-    {
-        for (size_t l = 0; l < 4; l++)
+        auto m_len = message_prefix_len + 16;
+        for (size_t i = message_prefix_len-1; i < m_len-1; i++)
         {
-            auto index = i + 3 - l;
-            message[i + l] = prefix.bytes[index];
+            prefix.bytes[i] = chars[nonce % 62];
+            nonce /= 62;
+            if (nonce < 0)
+                nonce = 0;
         }
 
-        //printf("%u\n", words[i/4]);
-    }
+        prefix.ints[15] = __byte_perm((m_len-1) * 8, 0, 0x0123);
+        
 
-    //message[62] = message_len_bits & 0xFF00;
-    //message[63] = message_len_bits & 0x00FF;
+        union {
+            uint8_t  message[512];
+            uint32_t words[64];
+        };
 
-    for (uint16_t i = 16; i < 64; i++)
-    {
-        auto womp = sigma1(words[i-2]) + words[i-7];
-        auto wamp = sigma0(words[i-15]) + words[i-16];
-        words[i] = womp + wamp;
-        //printf("%u, %u\n", i, words[i]);
-    }
 
-    //print_message(message);
+        //message[message_prefix_len-1] = 0x80;
 
-    /*
-    print_message(message);
-    print_message(message + 64);
-    print_message(message + 64 * 2);
-    print_message(message + 64 * 3);
-    */
-   
-    constexpr uint32_t h0[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
+        // maybe fix bit swappy swap
+        for (size_t i = 0; i < 64; i+=4)
+        {
+            for (size_t l = 0; l < 4; l++)
+            {
+                auto index = i + 3 - l;
+                message[i + l] = prefix.bytes[index];
+            }
 
-    uint32_t a = 0x6a09e667;
-    uint32_t b = 0xbb67ae85;
-    uint32_t c = 0x3c6ef372;
-    uint32_t d = 0xa54ff53a;
-    uint32_t e = 0x510e527f;
-    uint32_t f = 0x9b05688c;
-    uint32_t g = 0x1f83d9ab;
-    uint32_t h = 0x5be0cd19;
+            //printf("%u\n", words[i/4]);
+        }
+
+        //message[62] = message_len_bits & 0xFF00;
+        //message[63] = message_len_bits & 0x00FF;
+
+        for (uint16_t i = 16; i < 64; i++)
+        {
+            auto womp = sigma1(words[i-2]) + words[i-7];
+            auto wamp = sigma0(words[i-15]) + words[i-16];
+            words[i] = womp + wamp;
+            //printf("%u, %u\n", i, words[i]);
+        }
+
+        //print_message(message);
+
+        /*
+        print_message(message);
+        print_message(message + 64);
+        print_message(message + 64 * 2);
+        print_message(message + 64 * 3);
+        */
     
-    for (size_t i = 0; i < 64; i++)
-    {
-        uint32_t t1 = h + Sigma1(e) + Ch(e,f,g) + K[i] + words[i];
-        uint32_t t2 = Sigma0(a) + Maj(a,b,c);
+        constexpr uint32_t h0[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
 
-        h = g;
-        g = f;
-        f = e;
-        e = d + t1;
-        d = c;
-        c = b;
-        b = a;
-        a = t1 + t2;
+        uint32_t a = 0x6a09e667;
+        uint32_t b = 0xbb67ae85;
+        uint32_t c = 0x3c6ef372;
+        uint32_t d = 0xa54ff53a;
+        uint32_t e = 0x510e527f;
+        uint32_t f = 0x9b05688c;
+        uint32_t g = 0x1f83d9ab;
+        uint32_t h = 0x5be0cd19;
+        
+        for (size_t i = 0; i < 64; i++)
+        {
+            uint32_t t1 = h + Sigma1(e) + Ch(e,f,g) + K[i] + words[i];
+            uint32_t t2 = Sigma0(a) + Maj(a,b,c);
+
+            h = g;
+            g = f;
+            f = e;
+            e = d + t1;
+            d = c;
+            c = b;
+            b = a;
+            a = t1 + t2;
+        }
+
+        auto index = global_id * 8;
+
+        if (itter == 0) {
+            hashes[index] = a + h0[0]; //__byte_perm(a + h0[0], 0, 0x0123);
+            hashes[index + 1] = b + h0[1]; //__byte_perm(b + h0[1], 0, 0x0123);
+            hashes[index + 2] = c + h0[2]; //__byte_perm(c + h0[2], 0, 0x0123);
+            hashes[index + 3] = d + h0[3]; //__byte_perm(d + h0[3], 0, 0x0123);
+            hashes[index + 4] = e + h0[4]; //__byte_perm(e + h0[4], 0, 0x0123);
+            hashes[index + 5] = f + h0[5]; //__byte_perm(f + h0[5], 0, 0x0123);
+            hashes[index + 6] = g + h0[6]; //__byte_perm(g + h0[6], 0, 0x0123);
+            hashes[index + 7] = h + h0[7]; //__byte_perm(h + h0[7], 0, 0x0123);
+            nonces[global_id] = n;
+        } else {
+            uint32_t hash[8];
+            hash[0] = a + h0[0];
+            hash[1] = b + h0[1];
+            hash[2] = c + h0[2];
+            hash[3] = d + h0[3];
+            hash[4] = e + h0[4];
+            hash[5] = f + h0[5];
+            hash[6] = g + h0[6];
+            hash[7] = h + h0[7];
+
+            if (is_hash_smaller(hash, hashes + index)) {
+                hashes[index] = hash[0];
+                hashes[index + 1] = hash[1];
+                hashes[index + 2] = hash[2];
+                hashes[index + 3] = hash[3];
+                hashes[index + 4] = hash[4];
+                hashes[index + 5] = hash[5];
+                hashes[index + 6] = hash[6];
+                hashes[index + 7] = hash[7];
+                nonces[global_id] = n;
+            }
+        }
     }
-
-    auto index = global_id * 8;
-
-    hashes[index] = a + h0[0]; //__byte_perm(a + h0[0], 0, 0x0123);
-    hashes[index + 1] = b + h0[1]; //__byte_perm(b + h0[1], 0, 0x0123);
-    hashes[index + 2] = c + h0[2]; //__byte_perm(c + h0[2], 0, 0x0123);
-    hashes[index + 3] = d + h0[3]; //__byte_perm(d + h0[3], 0, 0x0123);
-    hashes[index + 4] = e + h0[4]; //__byte_perm(e + h0[4], 0, 0x0123);
-    hashes[index + 5] = f + h0[5]; //__byte_perm(f + h0[5], 0, 0x0123);
-    hashes[index + 6] = g + h0[6]; //__byte_perm(g + h0[6], 0, 0x0123);
-    hashes[index + 7] = h + h0[7]; //__byte_perm(h + h0[7], 0, 0x0123);
-
+    
     //prefix.bytes[m_len-1] = 0;
     //printf(prefix.bytes);
     //printf("\n%x%x%x%x%x%x%x%x\n", ht[0], ht[1], ht[2], ht[3], ht[4], ht[5], ht[6], ht[7]);
 }
 
-void get_print_hash(uint32_t global_id, uint32_t nonce_start) {
+void get_print_hash(uint64_t nonce) {
     char bytes[64] = "DeltaNeverUsed/\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
-    uint32_t nonce = global_id += nonce_start;
 
     auto m_len = message_prefix_len + 16;
     for (size_t i = message_prefix_len-1; i < m_len-1; i++)
@@ -200,49 +241,46 @@ void get_print_hash(uint32_t global_id, uint32_t nonce_start) {
     printf(bytes);
 }
 
-bool is_hash_smaller(const uint32_t* hash1, const uint32_t* hash2) {
-    for (size_t i = 0; i < 8; ++i) {
-        if (hash1[i] < hash2[i]) {
-            return true;
-        } else if (hash1[i] > hash2[i]) {
-            return false;
-        }
-    }
-    return false;
-}
-
 int main() {
 
     uint32_t current_best_hash[8];
     for (size_t i = 0; i < 8; i++)
         current_best_hash[i] = 0xFFFFFFFF;
-    
 
-    uint32_t nonce_start = 0;
+    uint64_t nonce_start = 2127366416;
 
-    auto block_dim = 1024;
-    auto grid_dim = 128;
+    auto grid_dim = 38 * 2;
+    auto block_dim = 256;
 
     size_t arr_size = block_dim * grid_dim;
     size_t arr_size_bytes = arr_size * sizeof(uint32_t) * 8;
 
+    uint64_t* nonces = (uint64_t*)malloc(arr_size * sizeof(uint64_t));
     uint32_t* hashes = (uint32_t*)malloc(arr_size_bytes);
     uint32_t* device_hashes;
+    uint64_t* device_nonces;
 
     cudaMalloc(&device_hashes, arr_size_bytes);
-
-    gpu_hash<<<grid_dim, block_dim>>>(nonce_start, device_hashes);
+    cudaMalloc(&device_nonces, arr_size * sizeof(uint64_t));
 
     uint64_t hashes_done = 0;
-
+    auto hash_start = std::chrono::high_resolution_clock::now();
+    
+    gpu_hash<<<grid_dim, block_dim>>>(nonce_start, device_hashes, device_nonces);
     while (true)
     {
         cudaDeviceSynchronize();
         cudaMemcpy(hashes, device_hashes, arr_size_bytes, cudaMemcpyDeviceToHost);
-        gpu_hash<<<grid_dim, block_dim>>>(nonce_start + arr_size, device_hashes);
-        hashes_done += arr_size;
+        cudaMemcpy(nonces, device_nonces, arr_size * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+        gpu_hash<<<grid_dim, block_dim>>>(nonce_start + arr_size * hashes_per_thread, device_hashes, device_nonces);
+        hashes_done += arr_size * hashes_per_thread;
 
-
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now()-hash_start) >= std::chrono::seconds(10)) {
+            hash_start += std::chrono::seconds(10);
+            printf("\nHashrate: %fGH/s\n", hashes_done / 1000000000. / 10);
+            hashes_done = 0;
+        }
+        
         for (size_t i = 0; i < arr_size; i++)
         {
             auto v = i * 8;
@@ -260,25 +298,26 @@ int main() {
                 char temp[80];
 
                 printf("Smaller hash found!\n");
-                get_print_hash(i, nonce_start);
+                get_print_hash(nonces[i]);
                 sprintf(temp, "\n%08x%08x%08x%08x%08x%08x%08x%08x\n", current_best_hash[0], current_best_hash[1], current_best_hash[2], current_best_hash[3], current_best_hash[4], current_best_hash[5], current_best_hash[6], current_best_hash[7]);
                 printf(temp);
                 
-                for (size_t i = 0; i < 64; i++){
-                    if (temp[i+1] != '0') {
-                        printf("Got %u zeros\n\n", i);
+                for (size_t j = 0; j < 64; j++){
+                    if (temp[j+1] != '0') {
+                        printf("Got %u zeros\n\n", j);
                         break;
                     }
                 }
+
+                printf("%u\n", nonces[i]);
                 
             }
         }
 
-        nonce_start += arr_size;
+
+        nonce_start += arr_size * hashes_per_thread;
     }
     
-    
-    
-
+    cudaFree(device_nonces);
     cudaFree(device_hashes);
 }
