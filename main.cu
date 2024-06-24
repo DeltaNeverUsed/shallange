@@ -211,7 +211,7 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
             if (u.arr[i] < hashes[hash_index + i]) {
                 new_better = true;
                 break;
-            } else {
+            } else if (u.arr[i] > hashes[hash_index + i]) {
                 break;
             }
         }
