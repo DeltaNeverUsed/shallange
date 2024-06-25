@@ -3,11 +3,13 @@
 #include <chrono>
 #include <thread>
 #include <vector>
+#include <fstream>
+
 //               DeltaNeverUsed/VRC/3+8GHs3060TI/________________/______
 //               aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-#define MESSAGE "DeltaNeverUsed/VRC/3+8GHs3060TI/\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0/000000\0\0\0\0\0\0\0\0"
+#define MESSAGE "DeltaNeverUsed/VRC/3+8GHs3060TI/\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0/mm0100\0\0\0\0\0\0\0\0"
 
-__device__ constexpr uint64_t hashes_per_thread = 0x100000;
+__device__ constexpr uint64_t hashes_per_thread = 0x010000;
 __device__ constexpr char* chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/";
 
 __device__ constexpr uint_fast8_t message_prefix_len = 32;
@@ -197,24 +199,27 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
         #pragma unroll
         for (uint_fast8_t i = 0; i < 64; i++)
         {
-            uint32_t t1 = u.h + Sigma1(u.e) + Ch(u.e,u.f,u.g) + K[i] + words[i];
-            uint32_t t2 = Sigma0(u.a) + Maj(u.a,u.b,u.c);
+            uint32_t &a = u.arr[(64 + 0 - i) % 8];
+            uint32_t &b = u.arr[(64 + 1 - i) % 8];
+            uint32_t &c = u.arr[(64 + 2 - i) % 8];
+            uint32_t &d = u.arr[(64 + 3 - i) % 8];
+            uint32_t &e = u.arr[(64 + 4 - i) % 8];
+            uint32_t &f = u.arr[(64 + 5 - i) % 8];
+            uint32_t &g = u.arr[(64 + 6 - i) % 8];
+            uint32_t &h = u.arr[(64 + 7 - i) % 8];
 
-            u.h = u.g;
-            u.g = u.f;
-            u.f = u.e;
-            u.e = u.d + t1;
-            u.d = u.c;
-            u.c = u.b;
-            u.b = u.a;
-            u.a = t1 + t2;
+            uint32_t t1 = h + Sigma1(e) + Ch(e,f,g) + K[i] + words[i];
+            uint32_t t2 = Sigma0(a) + Maj(a,b,c);
+
+            d += t1;
+            h = t1 + t2;
         }
 
         auto new_better = false;
         uint_fast8_t i = 0;
         #pragma unroll
         for (;i < 4; ++i) {
-            u.arr[i] = u.arr[i] + h0[i];
+            u.arr[i] += h0[i];
             if (u.arr[i] < hashes[hash_index + i]) {
                 new_better = true;
                 break;
@@ -242,6 +247,8 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
     }
 }
 
+std::ofstream output;
+
 void get_print_hash(uint64_t nonce) {
     char bytes[64] = MESSAGE;
 
@@ -253,6 +260,7 @@ void get_print_hash(uint64_t nonce) {
     }
 
     printf(bytes);
+    output << bytes;
 }
 
 uint64_t hashes_done;
@@ -260,9 +268,9 @@ uint64_t hashes_done;
 void hashrate_check() {
     while (true)
     {
-        _sleep(1000000);
+        std::this_thread::sleep_for(std::chrono::seconds(100));
         
-        printf("\nHashrate: %fGH/s\n", hashes_done / 1000000000. / 1000);
+        printf("\nHashrate: %fGH/s\n", hashes_done / 1000000000. / 100);
         hashes_done = 0;
     }
 }
@@ -299,6 +307,7 @@ int main() {
     }
     
     std::thread check = std::thread(hashrate_check);
+    output.open("results.txt"); 
 
     for (int i = 0; i < num_gpus; i++) {
         cudaSetDevice(i);
@@ -338,10 +347,13 @@ int main() {
                     get_print_hash(nonces[gpu][i]);
                     sprintf(temp, "\n%08x%08x%08x%08x%08x%08x%08x%08x\n", current_best_hash[0], current_best_hash[1], current_best_hash[2], current_best_hash[3], current_best_hash[4], current_best_hash[5], current_best_hash[6], current_best_hash[7]);
                     printf(temp);
+                    output << temp;
                     
                     for (size_t j = 0; j < 64; j++){
                         if (temp[j+1] != '0') {
-                            printf("Got %llu zeros\n\n", j);
+                            sprintf(temp, "Got %llu zeros\n\n", j);
+                            printf(temp);
+                            output << temp << std::endl << std::endl;
                             break;
                         }
                     }
@@ -354,6 +366,8 @@ int main() {
 
         nonce_start += arr_size * hashes_per_thread * num_gpus;
     }
+
+    output.close();
     
     for (int gpu = 0; gpu < num_gpus; ++gpu) {
         cudaFree(device_hashes[gpu]);
