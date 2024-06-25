@@ -3,10 +3,12 @@
 #include <chrono>
 #include <thread>
 
-__device__ constexpr uint64_t hashes_per_thread = 0x001000;
-__device__ constexpr char* chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+#define MESSAGE "DeltaNeverUsed/VRC/3+7GHs3060TI/\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
 
-__device__ constexpr unsigned int message_prefix_len = 16;
+__device__ constexpr uint64_t hashes_per_thread = 0x010000;
+__device__ constexpr char* chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/";
+
+__device__ constexpr uint_fast8_t message_prefix_len = 32;
 
 __device__ constexpr uint32_t K[64] = { 
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -96,9 +98,11 @@ __device__ __host__ bool is_hash_smaller(const uint32_t* hash1, const uint32_t* 
 
 __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonces) {
     union {
-        char     bytes[64] = "DeltaNeverUsed/_\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x80\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        char     bytes[64] = MESSAGE;
         uint32_t ints[16];
     } prefix;
+
+    prefix.bytes[48] = 0x80;
 
     auto thread_id = threadIdx.x;
     auto block_id = blockIdx.x;
@@ -143,12 +147,12 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
         #pragma unroll
         for (uint_fast8_t i = message_prefix_len; i < m_len; i++)
         {
-            prefix.bytes[i] = chars[nonce % 62];
-            nonce /= 62;
+            prefix.bytes[i] = chars[nonce & 63];
+            nonce >>= 6;
         }
 
         #pragma unroll
-        for (uint_fast8_t i = 16; i < 32; i+=4)
+        for (uint_fast8_t i = message_prefix_len; i < message_prefix_len+16; i+=4)
         {
             #pragma unroll
             for (uint_fast8_t l = 0; l < 4; l++)
@@ -233,20 +237,16 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
         
         
     }
-    
-    //prefix.bytes[m_len-1] = 0;
-    //printf(prefix.bytes);
-    //printf("\n%x%x%x%x%x%x%x%x\n", ht[0], ht[1], ht[2], ht[3], ht[4], ht[5], ht[6], ht[7]);
 }
 
 void get_print_hash(uint64_t nonce) {
-    char bytes[64] = "DeltaNeverUsed/_\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+    char bytes[64] = MESSAGE;
 
     auto m_len = message_prefix_len + 16;
-    for (size_t i = message_prefix_len; i < m_len; i++)
+    for (uint_fast8_t i = message_prefix_len; i < m_len; i++)
     {
-        bytes[i] = chars[nonce % 62];
-        nonce /= 62;
+        bytes[i] = chars[nonce & 63];
+        nonce >>= 6;
     }
 
     printf(bytes);
@@ -257,9 +257,9 @@ uint64_t hashes_done;
 void hashrate_check() {
     while (true)
     {
-        _sleep(15000);
+        _sleep(1000000);
         
-        printf("\nHashrate: %fGH/s\n", hashes_done / 1000000000. / 15);
+        printf("\nHashrate: %fGH/s\n", hashes_done / 1000000000. / 1000);
         hashes_done = 0;
     }
 }
@@ -270,7 +270,7 @@ int main() {
     for (size_t i = 0; i < 8; i++)
         current_best_hash[i] = 0xFFFFFFFF;
 
-    uint64_t nonce_start = 1807759095699;
+    uint64_t nonce_start = 0;
 
     auto grid_dim = 38 * 2;
     auto block_dim = 256;
