@@ -2,13 +2,16 @@
 #include <cuda/std/bit>
 #include <chrono>
 #include <thread>
+#include <vector>
+//               DeltaNeverUsed/VRC/3+8GHs3060TI/________________/______
+//               aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+#define MESSAGE "DeltaNeverUsed/VRC/3+8GHs3060TI/\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0/000000\0\0\0\0\0\0\0\0"
 
-#define MESSAGE "DeltaNeverUsed/VRC/3+7GHs3060TI/\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-
-__device__ constexpr uint64_t hashes_per_thread = 0x010000;
+__device__ constexpr uint64_t hashes_per_thread = 0x100000;
 __device__ constexpr char* chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/";
 
 __device__ constexpr uint_fast8_t message_prefix_len = 32;
+__device__ constexpr uint_fast8_t message_suffix_len = 7;
 
 __device__ constexpr uint32_t K[64] = { 
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -102,7 +105,7 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
         uint32_t ints[16];
     } prefix;
 
-    prefix.bytes[48] = 0x80;
+    prefix.bytes[55] = 0x80;
 
     auto thread_id = threadIdx.x;
     auto block_id = blockIdx.x;
@@ -119,7 +122,7 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
     hashes[hash_index + 6] = 0xFFFFFFFF;
     hashes[hash_index + 7] = 0xFFFFFFFF;
 
-    uint64_t nonce_p1 = (global_id + nonce_start) + (global_id * hashes_per_thread);
+    uint64_t nonce_p1 = nonce_start + (global_id * hashes_per_thread);
     constexpr auto m_len = message_prefix_len + 16;
 
     union {
@@ -137,7 +140,7 @@ __global__ void gpu_hash(uint64_t nonce_start, uint32_t *hashes, uint64_t *nonce
         }
     }
 
-    words[15] = m_len * 8;
+    words[15] = (m_len + message_suffix_len) * 8;
 
     for (uint32_t itter = 0; itter < hashes_per_thread; itter++)
     {
@@ -278,62 +281,84 @@ int main() {
     size_t arr_size = block_dim * grid_dim;
     size_t arr_size_bytes = arr_size * sizeof(uint32_t) * 8;
 
-    uint64_t* nonces = (uint64_t*)malloc(arr_size * sizeof(uint64_t));
-    uint32_t* hashes = (uint32_t*)malloc(arr_size_bytes);
-    uint32_t* device_hashes;
-    uint64_t* device_nonces;
+    int num_gpus;
+    cudaGetDeviceCount(&num_gpus);
 
-    cudaMalloc(&device_hashes, arr_size_bytes);
-    cudaMalloc(&device_nonces, arr_size * sizeof(uint64_t));
+    std::vector<uint64_t*> nonces(num_gpus);
+    std::vector<uint32_t*> hashes(num_gpus);
+    std::vector<uint32_t*> device_hashes(num_gpus);
+    std::vector<uint64_t*> device_nonces(num_gpus);
+
+    for (int gpu = 0; gpu < num_gpus; ++gpu) {
+        cudaSetDevice(gpu);
+
+        nonces[gpu] = (uint64_t*)malloc(arr_size * sizeof(uint64_t));
+        hashes[gpu] = (uint32_t*)malloc(arr_size_bytes);
+        cudaMalloc(&device_nonces[gpu], arr_size * sizeof(uint64_t));
+        cudaMalloc(&device_hashes[gpu], arr_size_bytes);
+    }
     
     std::thread check = std::thread(hashrate_check);
 
-    gpu_hash<<<grid_dim, block_dim>>>(nonce_start + arr_size * hashes_per_thread, device_hashes, device_nonces);
+    for (int i = 0; i < num_gpus; i++) {
+        cudaSetDevice(i);
+        gpu_hash<<<grid_dim, block_dim>>>(nonce_start + i * arr_size * hashes_per_thread, device_hashes[i], device_nonces[i]);
+    }
     while (true)
     {
-        cudaDeviceSynchronize();
-        cudaMemcpy(hashes, device_hashes, arr_size_bytes, cudaMemcpyDeviceToHost);
-        cudaMemcpy(nonces, device_nonces, arr_size * sizeof(uint64_t), cudaMemcpyDeviceToHost);
-        gpu_hash<<<grid_dim, block_dim>>>(nonce_start + arr_size * hashes_per_thread, device_hashes, device_nonces);
-        hashes_done += arr_size * hashes_per_thread;
+        for (int gpu = 0; gpu < num_gpus; gpu++) {
+            cudaSetDevice(gpu);
+            cudaDeviceSynchronize();
+            cudaMemcpy(hashes[gpu], device_hashes[gpu], arr_size_bytes, cudaMemcpyDeviceToHost);
+            cudaMemcpy(nonces[gpu], device_nonces[gpu], arr_size * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+            gpu_hash<<<grid_dim, block_dim>>>(nonce_start + gpu * arr_size * hashes_per_thread, device_hashes[gpu], device_nonces[gpu]);
+        }
+
+        hashes_done += arr_size * hashes_per_thread * num_gpus;
         
-        for (size_t i = 0; i < arr_size; i++)
-        {
-            auto v = i * 8;
-            if (is_hash_smaller(hashes + v, current_best_hash)) {
-                printf("i: %u v: %u\n", i, v);
-                current_best_hash[0] = hashes[v];
-                current_best_hash[1] = hashes[1 + v];
-                current_best_hash[2] = hashes[2 + v];
-                current_best_hash[3] = hashes[3 + v];
-                current_best_hash[4] = hashes[4 + v];
-                current_best_hash[5] = hashes[5 + v];
-                current_best_hash[6] = hashes[6 + v];
-                current_best_hash[7] = hashes[7 + v];
+        for (int gpu = 0; gpu < num_gpus; gpu++) {
+            for (size_t i = 0; i < arr_size; i++)
+            {
+                auto v = i * 8;
+                uint32_t *currentHash = hashes[gpu];
+                if (is_hash_smaller(currentHash + v, current_best_hash)) {
+                    printf("i: %u v: %u\n", i, v);
+                    current_best_hash[0] = currentHash[v];
+                    current_best_hash[1] = currentHash[1 + v];
+                    current_best_hash[2] = currentHash[2 + v];
+                    current_best_hash[3] = currentHash[3 + v];
+                    current_best_hash[4] = currentHash[4 + v];
+                    current_best_hash[5] = currentHash[5 + v];
+                    current_best_hash[6] = currentHash[6 + v];
+                    current_best_hash[7] = currentHash[7 + v];
 
-                char temp[80];
+                    char temp[80];
 
-                printf("Smaller hash found!\n");
-                get_print_hash(nonces[i]);
-                sprintf(temp, "\n%08x%08x%08x%08x%08x%08x%08x%08x\n", current_best_hash[0], current_best_hash[1], current_best_hash[2], current_best_hash[3], current_best_hash[4], current_best_hash[5], current_best_hash[6], current_best_hash[7]);
-                printf(temp);
-                
-                for (size_t j = 0; j < 64; j++){
-                    if (temp[j+1] != '0') {
-                        printf("Got %llu zeros\n\n", j);
-                        break;
+                    printf("Smaller hash found! on GPU: %u\n", gpu);
+                    get_print_hash(nonces[gpu][i]);
+                    sprintf(temp, "\n%08x%08x%08x%08x%08x%08x%08x%08x\n", current_best_hash[0], current_best_hash[1], current_best_hash[2], current_best_hash[3], current_best_hash[4], current_best_hash[5], current_best_hash[6], current_best_hash[7]);
+                    printf(temp);
+                    
+                    for (size_t j = 0; j < 64; j++){
+                        if (temp[j+1] != '0') {
+                            printf("Got %llu zeros\n\n", j);
+                            break;
+                        }
                     }
-                }
 
-                printf("%llu\n", nonces[i]);
-                
+                    printf("%llu\n", nonces[gpu][i]);
+                    
+                }
             }
         }
 
-
-        nonce_start += arr_size * hashes_per_thread;
+        nonce_start += arr_size * hashes_per_thread * num_gpus;
     }
     
-    cudaFree(device_nonces);
-    cudaFree(device_hashes);
+    for (int gpu = 0; gpu < num_gpus; ++gpu) {
+        cudaFree(device_hashes[gpu]);
+        cudaFree(device_nonces[gpu]);
+        free(hashes[gpu]);
+        free(nonces[gpu]);
+    }
 }
